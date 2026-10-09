@@ -1,0 +1,48 @@
+name: Check enrollment builds
+# Fork-only helper, never part of an enrollment pull request. Builds each project the way the scanner does and runs
+# the image's tests with no network.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/check]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [performancemonitor, performancestudio]
+    steps:
+      - name: Check out the enrollment branch (tools/ and projects/<name>/)
+        uses: actions/checkout@v4
+        with:
+          ref: enroll/${{ matrix.project }}
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Validate
+        run: python tools/validate.py
+
+      - name: Build as the scanner does (tools/check --no-shell)
+        run: |
+          start=$(date +%s)
+          python tools/check --no-shell ${{ matrix.project }}
+          echo "BUILD_SECONDS=$(( $(date +%s) - start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep oss-scanner-check || true
+
+      - name: Run the tests inside the image, no network
+        run: |
+          img="oss-scanner-check/built:${{ matrix.project }}"
+          if [ "${{ matrix.project }}" = "performancestudio" ]; then
+            docker run --rm --network none "$img" bash -c \
+              'dotnet test tests/PlanViewer.Core.Tests/PlanViewer.Core.Tests.csproj -c Debug --no-build -- --hangdump --hangdump-timeout 5m --hangdump-type none 2>&1 | tee /tmp/test.log | tail -n 3; grep -Ei "^ *(total|failed|succeeded|skipped):" /tmp/test.log || true; grep -E "\[FAIL\]|failed " /tmp/test.log | head -n 20 || true' || true
+          else
+            docker run --rm --network none "$img" bash -c \
+              'dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --version; ls /src/Lite/bin/Debug/*/PerformanceMonitorLite.dll /src/deprecated/Dashboard/bin/Debug/*/Dashboard.dll /src/Darling/PerformanceMonitor.Darling.Service/bin/Debug/*/PerformanceMonitor.Darling.Service.dll'
+          fi
